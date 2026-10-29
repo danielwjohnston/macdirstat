@@ -66,12 +66,15 @@ public final class DirectoryScanner: @unchecked Sendable {
                 }
             }
             
+            // Only files get the 1-byte floor so zero-byte files stay visible.
+            // Directories start at 0 and accumulate their children's sizes;
+            // a floor here would be counted once per directory in every ancestor.
             let itemNode = FileItem(
                 name: name,
                 url: itemURL,
                 isDirectory: isDir,
                 isPackage: isPkg,
-                size: max(1, size),
+                size: isDir && !isPkg ? size : max(1, size),
                 fileCount: isDir ? 0 : 1,
                 subdirCount: 0,
                 modificationDate: modDate

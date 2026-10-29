@@ -607,10 +607,12 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
     }
     
     public func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
-        if item == nil {
-            return globalRootItem!
+        if item == nil, let root = globalRootItem {
+            return root
         }
-        let f = item as! FileItem
+        guard let f = item as? FileItem, f.children.indices.contains(index) else {
+            preconditionFailure("NSOutlineView requested child \(index) of an item that has no such child")
+        }
         return f.children[index]
     }
     
