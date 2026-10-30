@@ -436,6 +436,7 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
         let scanOptions = DirectoryScanner.ScanOptions(inspectInsidePackages: inspectPackages, showFreeSpace: showFree)
         
         let progress = scanProgress
+        let scanStart = CFAbsoluteTimeGetCurrent()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             DirectoryScanner.scan(url: url, options: scanOptions, rootItem: root) { _ in
                 progress.increment()
@@ -458,7 +459,8 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
                 self.outlineView.expandItem(root)
                 self.treeMapView.layout()
                 self.treeMapView.needsDisplay = true
-                self.statusLabel.stringValue = "Scan complete: \(root.formattedSize()) across \(self.scanProgress.value) items in \(url.lastPathComponent)"
+                let elapsed = CFAbsoluteTimeGetCurrent() - scanStart
+                self.statusLabel.stringValue = "Scan complete: \(root.formattedSize()) across \(self.scanProgress.value) items in \(url.lastPathComponent) (\(String(format: "%.2f", elapsed)) s)"
             }
         }
     }
