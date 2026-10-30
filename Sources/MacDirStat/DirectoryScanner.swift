@@ -6,7 +6,11 @@ public struct InodeIdentifier: Hashable, Sendable {
 }
 
 public final class DirectoryScanner: @unchecked Sendable {
-    
+
+    /// Guards every mutation of the scanned `FileItem` tree. UI code that reads
+    /// the tree while a scan is running must hold this lock too.
+    public static let treeLock = NSLock()
+
     public struct ScanOptions: Sendable {
         public var inspectInsidePackages: Bool
         public var showFreeSpace: Bool
@@ -33,7 +37,7 @@ public final class DirectoryScanner: @unchecked Sendable {
         ]
         
         var visitedInodes = Set<InodeIdentifier>()
-        let lock = NSLock()
+        let lock = treeLock
         
         func scanItem(at itemURL: URL, parentNode: FileItem) -> FileItem {
             let name = itemURL.lastPathComponent

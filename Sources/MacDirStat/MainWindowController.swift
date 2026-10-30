@@ -409,6 +409,8 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
         renderTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             DispatchQueue.main.async {
                 guard let self = self, self.isScanning else { return }
+                DirectoryScanner.treeLock.lock()
+                defer { DirectoryScanner.treeLock.unlock() }
                 let now = CFAbsoluteTimeGetCurrent()
                 if now - lastRenderTime >= 0.1 {
                     lastRenderTime = now
@@ -436,6 +438,8 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
             
             DispatchQueue.main.async {
                 guard let self = self else { return }
+                DirectoryScanner.treeLock.lock()
+                defer { DirectoryScanner.treeLock.unlock() }
                 self.isScanning = false
                 self.renderTimer?.invalidate()
                 self.renderTimer = nil
