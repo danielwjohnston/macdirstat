@@ -109,7 +109,7 @@ public final class DirectoryScanner: @unchecked Sendable {
                 if let enumerator = fileManager.enumerator(
                     at: itemURL,
                     includingPropertiesForKeys: keys,
-                    options: [.skipsSubdirectoryDescendants, .skipsHiddenFiles]
+                    options: [.skipsSubdirectoryDescendants]
                 ) {
                     for case let childURL as URL in enumerator {
                         _ = scanItem(at: childURL, parentNode: itemNode)
@@ -124,7 +124,7 @@ public final class DirectoryScanner: @unchecked Sendable {
         if let enumerator = fileManager.enumerator(
             at: url,
             includingPropertiesForKeys: keys,
-            options: [.skipsSubdirectoryDescendants, .skipsHiddenFiles]
+            options: [.skipsSubdirectoryDescendants]
         ) {
             for case let childURL as URL in enumerator {
                 _ = scanItem(at: childURL, parentNode: rootItem)
