@@ -256,6 +256,8 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
     }
     
     @objc private func handleThemeChanged() {
+        DirectoryScanner.treeLock.lock()
+        defer { DirectoryScanner.treeLock.unlock() }
         applyTheme()
         ExtensionColorManager.shared.resetPalette()
         if let root = globalRootItem {
