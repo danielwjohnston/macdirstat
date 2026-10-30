@@ -312,6 +312,8 @@ public final class TreeMapView: NSView {
     }
     
     public override func mouseDown(with event: NSEvent) {
+        DirectoryScanner.treeLock.lock()
+        defer { DirectoryScanner.treeLock.unlock() }
         let point = convert(event.locationInWindow, from: nil)
         if let hit = hitTestItem(root: displayedRootItem, point: point) {
             selectedItem = hit
@@ -324,6 +326,8 @@ public final class TreeMapView: NSView {
     }
     
     public override func rightMouseDown(with event: NSEvent) {
+        DirectoryScanner.treeLock.lock()
+        defer { DirectoryScanner.treeLock.unlock() }
         let point = convert(event.locationInWindow, from: nil)
         if let hit = hitTestItem(root: displayedRootItem, point: point) {
             selectedItem = hit

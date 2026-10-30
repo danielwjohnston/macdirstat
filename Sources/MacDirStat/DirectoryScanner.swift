@@ -8,8 +8,10 @@ public struct InodeIdentifier: Hashable, Sendable {
 public final class DirectoryScanner: @unchecked Sendable {
 
     /// Guards every mutation of the scanned `FileItem` tree. UI code that reads
-    /// the tree while a scan is running must hold this lock too.
-    public static let treeLock = NSLock()
+    /// the tree while a scan is running must hold this lock too. Recursive so
+    /// UI callbacks that re-enter each other (e.g. reloadData -> data source)
+    /// don't deadlock.
+    public static let treeLock = NSRecursiveLock()
 
     public struct ScanOptions: Sendable {
         public var inspectInsidePackages: Bool
@@ -174,5 +176,26 @@ public final class DirectoryScanner: @unchecked Sendable {
                 }
             }
         }
+    }
+}
+
+/// Thread-safe discovery counter. Incremented from the scan queue without
+/// hopping to the main queue for every file.
+public final class ScanProgress: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    public init() {}
+
+    public func increment() {
+        lock.lock()
+        count += 1
+        lock.unlock()
+    }
+
+    public var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
     }
 }
