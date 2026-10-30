@@ -42,7 +42,7 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
     private var pacmanFrame = 0
     private let pacmanAnim = ["ᗧ • • • •", "ᗧ• • • • ", "ᗧ  • • • ", "ᗧ   • • ", "ᗧ    • ", "ᗧ     ", "ᗤ     ", "ᗤ    •", "ᗤ   • •", "ᗤ  • • •"]
     
-    private var liveDiscoveredCount = 0
+    private var scanProgress = ScanProgress()
     private var isScanning = false
     
     private var selectDrivesController: SelectDrivesWindowController?
@@ -256,6 +256,8 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
     }
     
     @objc private func handleThemeChanged() {
+        DirectoryScanner.treeLock.lock()
+        defer { DirectoryScanner.treeLock.unlock() }
         applyTheme()
         ExtensionColorManager.shared.resetPalette()
         if let root = globalRootItem {
@@ -324,6 +326,8 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
     }
     
     @objc private func zoomOut() {
+        DirectoryScanner.treeLock.lock()
+        defer { DirectoryScanner.treeLock.unlock() }
         guard let current = currentZoomRoot, let parent = current.parent else {
             currentZoomRoot = globalRootItem
             zoomUpButton.isEnabled = false
@@ -337,6 +341,8 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
     }
     
     @objc private func exportToCSV() {
+        DirectoryScanner.treeLock.lock()
+        defer { DirectoryScanner.treeLock.unlock() }
         guard let root = globalRootItem else { return }
         let savePanel = NSSavePanel()
         savePanel.allowedContentTypes = [.commaSeparatedText]
@@ -375,7 +381,7 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
     public func startScan(at url: URL) {
         currentScanURL = url
         isScanning = true
-        liveDiscoveredCount = 0
+        scanProgress = ScanProgress()
         progressIndicator.startAnimation(nil)
         statusLabel.stringValue = "Scanning \(url.path)..."
         
@@ -409,12 +415,14 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
         renderTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             DispatchQueue.main.async {
                 guard let self = self, self.isScanning else { return }
+                DirectoryScanner.treeLock.lock()
+                defer { DirectoryScanner.treeLock.unlock() }
                 let now = CFAbsoluteTimeGetCurrent()
                 if now - lastRenderTime >= 0.1 {
                     lastRenderTime = now
                     self.treeMapView.layout()
                     self.treeMapView.needsDisplay = true
-                    self.statusLabel.stringValue = "Scanning: \(self.liveDiscoveredCount) items (\(root.formattedSize()))..."
+                    self.statusLabel.stringValue = "Scanning: \(self.scanProgress.value) items (\(root.formattedSize()))..."
                     
                     self.outlineView.reloadData()
                     self.updateExtensionSummaries(from: root)
@@ -427,15 +435,17 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
         let showFree = AppSettings.shared.showFreeSpace
         let scanOptions = DirectoryScanner.ScanOptions(inspectInsidePackages: inspectPackages, showFreeSpace: showFree)
         
+        let progress = scanProgress
+        let scanStart = CFAbsoluteTimeGetCurrent()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            DirectoryScanner.scan(url: url, options: scanOptions, rootItem: root) { [weak self] _ in
-                DispatchQueue.main.async {
-                    self?.liveDiscoveredCount += 1
-                }
+            DirectoryScanner.scan(url: url, options: scanOptions, rootItem: root) { _ in
+                progress.increment()
             }
             
             DispatchQueue.main.async {
                 guard let self = self else { return }
+                DirectoryScanner.treeLock.lock()
+                defer { DirectoryScanner.treeLock.unlock() }
                 self.isScanning = false
                 self.renderTimer?.invalidate()
                 self.renderTimer = nil
@@ -449,7 +459,8 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
                 self.outlineView.expandItem(root)
                 self.treeMapView.layout()
                 self.treeMapView.needsDisplay = true
-                self.statusLabel.stringValue = "Scan complete: \(root.formattedSize()) across \(self.liveDiscoveredCount) items in \(url.lastPathComponent)"
+                let elapsed = CFAbsoluteTimeGetCurrent() - scanStart
+                self.statusLabel.stringValue = "Scan complete: \(root.formattedSize()) across \(self.scanProgress.value) items in \(url.lastPathComponent) (\(String(format: "%.2f", elapsed)) s)"
             }
         }
     }
@@ -599,6 +610,8 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
     
     // MARK: - NSOutlineViewDataSource
     public func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
+        DirectoryScanner.treeLock.lock()
+        defer { DirectoryScanner.treeLock.unlock() }
         if item == nil {
             return globalRootItem != nil ? 1 : 0
         }
@@ -607,10 +620,14 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
     }
     
     public func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
-        if item == nil {
-            return globalRootItem!
+        DirectoryScanner.treeLock.lock()
+        defer { DirectoryScanner.treeLock.unlock() }
+        if item == nil, let root = globalRootItem {
+            return root
         }
-        let f = item as! FileItem
+        guard let f = item as? FileItem, f.children.indices.contains(index) else {
+            preconditionFailure("NSOutlineView requested child \(index) of an item that has no such child")
+        }
         return f.children[index]
     }
     
@@ -621,6 +638,8 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
     
     // MARK: - NSOutlineViewDelegate
     public func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
+        DirectoryScanner.treeLock.lock()
+        defer { DirectoryScanner.treeLock.unlock() }
         guard let f = item as? FileItem, let col = tableColumn else { return nil }
         let identifier = col.identifier
         let theme = AppSettings.shared.theme
@@ -687,6 +706,8 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
     }
     
     public func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        DirectoryScanner.treeLock.lock()
+        defer { DirectoryScanner.treeLock.unlock() }
         guard let col = tableColumn, row < extensionSummaries.count else { return nil }
         let summary = extensionSummaries[row]
         let id = col.identifier

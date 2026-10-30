@@ -44,6 +44,29 @@ struct MacDirStatTests {
         #expect(areaB > areaC)
     }
     
+    @Test("Directory Scanner includes hidden and nested entries in totals")
+    func testDirectoryScannerIncludesHiddenAndNested() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let nested = tempDir.appendingPathComponent("nested")
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        try Data(repeating: 1, count: 10_000).write(to: tempDir.appendingPathComponent(".hidden"))
+        try Data(repeating: 2, count: 10_000).write(to: nested.appendingPathComponent("inner.bin"))
+
+        let root = FileItem(name: tempDir.lastPathComponent, url: tempDir, isDirectory: true)
+        DirectoryScanner.scan(url: tempDir, options: DirectoryScanner.ScanOptions(showFreeSpace: false), rootItem: root)
+
+        #expect(root.children.contains(where: { $0.name == ".hidden" }))
+        let nestedNode = try #require(root.children.first(where: { $0.name == "nested" }))
+        #expect(nestedNode.children.contains(where: { $0.name == "inner.bin" }))
+
+        // A directory's size is the sum of its children, with no per-directory floor.
+        let childSum = root.children.reduce(UInt64(0)) { $0 + $1.size }
+        #expect(root.size == childSum)
+        #expect(nestedNode.size == nestedNode.children.reduce(UInt64(0)) { $0 + $1.size })
+    }
+
     @Test("Directory Scanner correctly calculates cumulative size")
     func testDirectoryScanner() {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
