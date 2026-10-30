@@ -135,6 +135,8 @@ public final class TreeMapView: NSView {
     
     public override func layout() {
         super.layout()
+        DirectoryScanner.treeLock.lock()
+        defer { DirectoryScanner.treeLock.unlock() }
         if let root = displayedRootItem {
             TreeMapEngine.layout(item: root, in: bounds)
             metalRenderer?.updateGeometry()
@@ -144,7 +146,9 @@ public final class TreeMapView: NSView {
     
     public override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        
+        DirectoryScanner.treeLock.lock()
+        defer { DirectoryScanner.treeLock.unlock() }
+
         // If Metal is active and rendering in MTKView, update clear color and trigger redraw
         if let mtk = mtkView {
             let canvasColor = AppSettings.shared.theme.treemapCanvasBackgroundColor
