@@ -1,4 +1,5 @@
 import Cocoa
+import Quartz
 
 public final class ExtensionSummary: NSObject, @unchecked Sendable {
     public let ext: String
@@ -12,10 +13,15 @@ public final class ExtensionSummary: NSObject, @unchecked Sendable {
         self.fileCount = fileCount
         self.color = color
     }
+    
+    /// ".swift" for real extensions; pseudo names such as <none>, <dir> and app/pkg are shown as-is
+    public static func displayName(for ext: String) -> String {
+        return ext.hasPrefix("<") || ext.contains("/") ? ext : "." + ext
+    }
 }
 
 @MainActor
-public final class MainWindowController: NSWindowController, NSOutlineViewDataSource, NSOutlineViewDelegate, NSTableViewDataSource, NSTableViewDelegate, TreeMapSelectionDelegate, SelectDrivesDelegate {
+public final class MainWindowController: NSWindowController, NSOutlineViewDataSource, NSOutlineViewDelegate, NSTableViewDataSource, NSTableViewDelegate, TreeMapSelectionDelegate, SelectDrivesDelegate, @MainActor QLPreviewPanelDataSource {
     
     private var globalRootItem: FileItem?
     private var currentZoomRoot: FileItem?
@@ -36,13 +42,14 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
     private var headerBar: NSView!
     private var statusBar: NSView!
     
-    private var currentScanURL: URL?
+    private var currentScanURLs: [URL] = []
+    private var scanSession: ScanSession?
+    private var extensionTotals: [String: ExtensionStat] = [:]
     private var pacmanTimer: Timer?
     private var renderTimer: Timer?
     private var pacmanFrame = 0
     private let pacmanAnim = ["ᗧ • • • •", "ᗧ• • • • ", "ᗧ  • • • ", "ᗧ   • • ", "ᗧ    • ", "ᗧ     ", "ᗤ     ", "ᗤ    •", "ᗤ   • •", "ᗤ  • • •"]
     
-    private var liveDiscoveredCount = 0
     private var isScanning = false
     
     private var selectDrivesController: SelectDrivesWindowController?
@@ -64,6 +71,13 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
             self,
             selector: #selector(handleThemeChanged),
             name: NSNotification.Name("ThemeChangedNotification"),
+            object: nil
+        )
+        
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleTreemapSettingsChanged),
+            name: AppSettings.treemapSettingsChangedNotification,
             object: nil
         )
         
@@ -255,14 +269,16 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
         splitView.adjustSubviews()
     }
     
+    @objc private func handleTreemapSettingsChanged() {
+        treeMapView.refresh()
+    }
+    
     @objc private func handleThemeChanged() {
         applyTheme()
         ExtensionColorManager.shared.resetPalette()
-        if let root = globalRootItem {
-            updateExtensionSummaries(from: root)
-        }
+        refreshExtensionTable()
         outlineView.reloadData()
-        treeMapView.needsDisplay = true
+        treeMapView.refresh()
     }
     
     private func applyTheme() {
@@ -305,15 +321,25 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
     }
     
     public func didSelectScanTarget(urls: [URL]) {
-        if let first = urls.first {
-            startScan(at: first)
-        }
+        startScan(urls: urls)
     }
     
     @objc private func togglePackageInspection() {
-        if let url = currentScanURL {
-            startScan(at: url)
+        rescan()
+    }
+    
+    @objc public func rescan() {
+        if !currentScanURLs.isEmpty {
+            startScan(urls: currentScanURLs)
         }
+    }
+    
+    @objc public func showSelectDrives() {
+        openSelectDrives()
+    }
+    
+    @objc public func showPreferences() {
+        openPreferences()
     }
     
     @objc private func paletteModeChanged() {
@@ -336,6 +362,16 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
         statusLabel.stringValue = "Zoomed to: \(parent.url.path)"
     }
     
+    @objc public func exportReport() {
+        exportToCSV()
+    }
+    
+    @objc public func zoomOutAction() {
+        if zoomUpButton.isEnabled {
+            zoomOut()
+        }
+    }
+    
     @objc private func exportToCSV() {
         guard let root = globalRootItem else { return }
         let savePanel = NSSavePanel()
@@ -344,53 +380,114 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
         
         if savePanel.runModal() == .OK, let url = savePanel.url {
             var lines = ["Name,Path,Size (Bytes),Formatted Size,Subtree %,Files,Subdirectories"]
+            // RFC 4180: quote every text field and double any embedded quotes
+            func csvField(_ value: String) -> String {
+                return "\"" + value.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+            }
             func traverse(item: FileItem) {
-                let escapedPath = "\"\(item.url.path)\""
-                let escapedName = "\"\(item.name)\""
                 let pct = String(format: "%.2f%%", item.subtreePercentage() * 100)
-                lines.append("\(escapedName),\(escapedPath),\(item.size),\"\(item.formattedSize())\",\(pct),\(item.fileCount),\(item.subdirCount)")
+                lines.append("\(csvField(item.name)),\(csvField(item.url.path)),\(item.size),\(csvField(item.formattedSize())),\(pct),\(item.fileCount),\(item.subdirCount)")
                 for child in item.children {
                     traverse(item: child)
                 }
             }
             traverse(item: root)
-            let csvText = lines.joined(separator: "\n")
-            try? csvText.write(to: url, atomically: true, encoding: .utf8)
-            statusLabel.stringValue = "Exported report to \(url.lastPathComponent)"
+            let csvText = lines.joined(separator: "\n") + "\n"
+            do {
+                try csvText.write(to: url, atomically: true, encoding: .utf8)
+                statusLabel.stringValue = "Exported report to \(url.lastPathComponent)"
+            } catch {
+                NSAlert(error: error).runModal()
+            }
         }
     }
     
     // Quick Look (Spacebar) Support
     public override func keyDown(with event: NSEvent) {
         if event.charactersIgnoringModifiers == " " {
-            if let item = selectedItem {
-                NSWorkspace.shared.open(item.url)
-            }
+            toggleQuickLook()
         } else {
             super.keyDown(with: event)
         }
     }
     
+    @objc public func toggleQuickLook() {
+        guard let panel = QLPreviewPanel.shared() else { return }
+        if QLPreviewPanel.sharedPreviewPanelExists() && panel.isVisible {
+            panel.orderOut(nil)
+        } else if let item = selectedItem, !item.isSpecialNode {
+            panel.makeKeyAndOrderFront(nil)
+        }
+    }
+    
+    public override func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool {
+        return true
+    }
+    
+    // QLPreviewPanel calls these informal-protocol hooks on the main thread
+    public override func beginPreviewPanelControl(_ panel: QLPreviewPanel!) {
+        MainActor.assumeIsolated {
+            panel.dataSource = self
+            panel.reloadData()
+        }
+    }
+    
+    public override func endPreviewPanelControl(_ panel: QLPreviewPanel!) {
+        MainActor.assumeIsolated {
+            panel.dataSource = nil
+        }
+    }
+    
+    public func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int {
+        guard let item = selectedItem, !item.isSpecialNode else { return 0 }
+        return 1
+    }
+    
+    public func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> QLPreviewItem! {
+        return selectedItem?.url as NSURL?
+    }
+    
     // MARK: - Scanning
     public func startScan(at url: URL) {
-        currentScanURL = url
+        startScan(urls: [url])
+    }
+    
+    public func startScan(urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        scanSession?.cancel()
+        let session = ScanSession()
+        scanSession = session
+        currentScanURLs = urls
         isScanning = true
-        liveDiscoveredCount = 0
+        extensionTotals = [:]
         progressIndicator.startAnimation(nil)
-        statusLabel.stringValue = "Scanning \(url.path)..."
         
-        let root = FileItem(
-            name: url.lastPathComponent.isEmpty ? url.path : url.lastPathComponent,
-            url: url,
-            isDirectory: true,
-            size: 1
-        )
+        // A single target is the root itself; several drives hang under a synthetic root like WinDirStat's "My Computer"
+        let root: FileItem
+        var targets: [(url: URL, node: FileItem)] = []
+        if urls.count == 1, let url = urls.first {
+            root = FileItem(name: displayName(for: url), url: url, isDirectory: true)
+            targets = [(url, root)]
+        } else {
+            root = FileItem(name: "Selected Drives", url: URL(fileURLWithPath: "/"), isDirectory: true)
+            for url in urls {
+                let node = FileItem(name: displayName(for: url), url: url, isDirectory: true)
+                root.attach(node)
+                targets.append((url, node))
+            }
+        }
+        let scanLabel = urls.count == 1 ? urls[0].path : "\(urls.count) drives"
+        statusLabel.stringValue = "Scanning \(scanLabel)..."
+        
         self.globalRootItem = root
         self.currentZoomRoot = root
+        self.selectedItem = nil
+        self.zoomUpButton.isEnabled = false
+        self.treeMapView.selectedItem = nil
         self.treeMapView.displayedRootItem = root
-        self.treeMapView.layout()
-        self.treeMapView.needsDisplay = true
+        self.treeMapView.needsLayout = true
         self.outlineView.reloadData()
+        self.refreshExtensionTable()
         
         // Chomping Pac-Man Animation
         pacmanTimer?.invalidate()
@@ -403,39 +500,40 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
             }
         }
         
-        // Throttle updates smoothly to 10 FPS during scan to avoid visual thrashing
-        var lastRenderTime = CFAbsoluteTimeGetCurrent()
+        // Refresh views at 10 FPS during the scan; the tree itself is only mutated on the main thread
         renderTimer?.invalidate()
         renderTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             DispatchQueue.main.async {
-                guard let self = self, self.isScanning else { return }
-                let now = CFAbsoluteTimeGetCurrent()
-                if now - lastRenderTime >= 0.1 {
-                    lastRenderTime = now
-                    self.treeMapView.layout()
-                    self.treeMapView.needsDisplay = true
-                    self.statusLabel.stringValue = "Scanning: \(self.liveDiscoveredCount) items (\(root.formattedSize()))..."
-                    
-                    self.outlineView.reloadData()
-                    self.updateExtensionSummaries(from: root)
-                    self.extTableView.reloadData()
-                }
+                guard let self = self, self.isScanning, self.scanSession === session else { return }
+                self.treeMapView.needsLayout = true
+                self.statusLabel.stringValue = "Scanning: \(session.itemCount) items (\(root.formattedSize()))..."
+                self.outlineView.reloadData()
+                self.refreshExtensionTable()
             }
         }
         
         let inspectPackages = packageToggleCheckbox.state == .on
         let showFree = AppSettings.shared.showFreeSpace
         let scanOptions = DirectoryScanner.ScanOptions(inspectInsidePackages: inspectPackages, showFreeSpace: showFree)
+        let startTime = CFAbsoluteTimeGetCurrent()
+        let scanTargets = targets
         
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            DirectoryScanner.scan(url: url, options: scanOptions, rootItem: root) { [weak self] _ in
-                DispatchQueue.main.async {
-                    self?.liveDiscoveredCount += 1
+            DispatchQueue.concurrentPerform(iterations: scanTargets.count) { index in
+                let target = scanTargets[index]
+                DirectoryScanner.scan(url: target.url, options: scanOptions, rootItem: target.node, session: session) { item in
+                    // Extension stats are computed here, off the main thread, while the subtree is still private
+                    let stats = item.extensionStats()
+                    DispatchQueue.main.async {
+                        guard let self = self, self.scanSession === session else { return }
+                        target.node.attach(item)
+                        self.mergeExtensionStats(stats, sign: 1)
+                    }
                 }
             }
             
             DispatchQueue.main.async {
-                guard let self = self else { return }
+                guard let self = self, self.scanSession === session else { return }
                 self.isScanning = false
                 self.renderTimer?.invalidate()
                 self.renderTimer = nil
@@ -444,44 +542,49 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
                 self.pacmanLabel.stringValue = "✓ Ready"
                 self.progressIndicator.stopAnimation(nil)
                 
-                self.updateExtensionSummaries(from: root)
+                self.refreshExtensionTable()
                 self.outlineView.reloadData()
                 self.outlineView.expandItem(root)
-                self.treeMapView.layout()
-                self.treeMapView.needsDisplay = true
-                self.statusLabel.stringValue = "Scan complete: \(root.formattedSize()) across \(self.liveDiscoveredCount) items in \(url.lastPathComponent)"
+                self.treeMapView.needsLayout = true
+                let elapsed = CFAbsoluteTimeGetCurrent() - startTime
+                self.statusLabel.stringValue = "Scan complete: \(root.formattedSize()) across \(session.itemCount) items in \(scanLabel) (\(String(format: "%.1f", elapsed)) s)"
             }
         }
     }
     
-    private func updateExtensionSummaries(from root: FileItem) {
-        var extMap: [String: (bytes: UInt64, count: Int)] = [:]
-        func collectExt(item: FileItem) {
-            if !item.isDirectory || item.isPackage || item.isSpecialNode {
-                let ext = item.extensionName
-                var current = extMap[ext] ?? (0, 0)
-                current.bytes += item.size
-                current.count += 1
-                extMap[ext] = current
-            }
-            for child in item.children {
-                collectExt(item: child)
-            }
+    private func displayName(for url: URL) -> String {
+        if let volumeName = try? url.resourceValues(forKeys: [.isVolumeKey, .volumeNameKey]),
+           volumeName.isVolume == true, let name = volumeName.volumeName {
+            return name
         }
-        collectExt(item: root)
-        
-        let sorted = extMap.map { (key, val) in
-            (ext: key, bytes: val.bytes, count: val.count)
-        }.sorted(by: { $0.bytes > $1.bytes })
-        
-        self.extensionSummaries = sorted.map {
-            ExtensionSummary(
-                ext: $0.ext,
-                bytes: $0.bytes,
-                fileCount: $0.count,
-                color: ExtensionColorManager.shared.color(for: $0.ext)
-            )
+        return url.lastPathComponent.isEmpty ? url.path : url.lastPathComponent
+    }
+    
+    private func mergeExtensionStats(_ stats: [String: ExtensionStat], sign: Int) {
+        for (ext, stat) in stats {
+            var total = extensionTotals[ext] ?? ExtensionStat()
+            if sign >= 0 {
+                total.bytes += stat.bytes
+                total.count += stat.count
+            } else {
+                total.bytes -= min(total.bytes, stat.bytes)
+                total.count = max(0, total.count - stat.count)
+            }
+            extensionTotals[ext] = total.count > 0 || total.bytes > 0 ? total : nil
         }
+    }
+    
+    private func refreshExtensionTable() {
+        self.extensionSummaries = extensionTotals
+            .sorted(by: { $0.value.bytes > $1.value.bytes })
+            .map {
+                ExtensionSummary(
+                    ext: $0.key,
+                    bytes: $0.value.bytes,
+                    fileCount: $0.value.count,
+                    color: ExtensionColorManager.shared.color(for: $0.key)
+                )
+            }
         self.extTableView.reloadData()
     }
     
@@ -499,6 +602,11 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
         
         menu.addItem(NSMenuItem.separator())
         
+        if item.isSpecialNode {
+            menu.popUp(positioning: nil, at: point, in: treeMapView)
+            return
+        }
+        
         // Custom Cleanups
         for cleanup in AppSettings.shared.cleanups {
             let cleanItem = NSMenuItem(title: cleanup.title, action: #selector(executeUserCleanup(_:)), keyEquivalent: "")
@@ -512,6 +620,8 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
         let trashItem = NSMenuItem(title: "Move to Trash", action: #selector(contextTrash), keyEquivalent: "")
         trashItem.target = self
         menu.addItem(trashItem)
+        
+        trashItem.isEnabled = item.parent != nil && !currentScanURLs.contains(item.url)
         
         menu.popUp(positioning: nil, at: point, in: treeMapView)
     }
@@ -540,10 +650,21 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
         if alert.runModal() == .alertFirstButtonReturn {
             do {
                 try FileManager.default.trashItem(at: item.url, resultingItemURL: nil)
-                statusLabel.stringValue = "Moved \(item.name) to Trash. Rescanning..."
-                if let url = currentScanURL {
-                    startScan(at: url)
+                // Remove the subtree in place (as WinDirStat does) instead of rescanning the whole target
+                mergeExtensionStats(item.extensionStats(), sign: -1)
+                let wasZoomedInside = isAncestor(item, of: currentZoomRoot)
+                item.detachFromParent()
+                if wasZoomedInside {
+                    currentZoomRoot = globalRootItem
+                    treeMapView.displayedRootItem = globalRootItem
+                    zoomUpButton.isEnabled = false
                 }
+                selectedItem = nil
+                treeMapView.selectedItem = nil
+                outlineView.reloadData()
+                refreshExtensionTable()
+                treeMapView.refresh()
+                statusLabel.stringValue = "Moved \(item.name) (\(item.formattedSize())) to Trash."
             } catch {
                 let errAlert = NSAlert(error: error)
                 errAlert.runModal()
@@ -551,20 +672,26 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
         }
     }
     
+    private func isAncestor(_ candidate: FileItem, of item: FileItem?) -> Bool {
+        var node = item
+        while let n = node {
+            if n === candidate { return true }
+            node = n.parent
+        }
+        return false
+    }
+    
     @objc private func executeUserCleanup(_ sender: NSMenuItem) {
         guard let cleanup = sender.representedObject as? UserCleanupCommand,
               let item = selectedItem else { return }
         
-        let cmd = cleanup.commandTemplate
-            .replacingOccurrences(of: "%p", with: item.url.path)
-            .replacingOccurrences(of: "%n", with: item.name)
-            .replacingOccurrences(of: "%s", with: item.formattedSize())
-        
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-c", cmd]
-        try? process.run()
-        statusLabel.stringValue = "Executed cleanup: \(cleanup.title)"
+        do {
+            let process = UserCleanupCommand.makeProcess(template: cleanup.commandTemplate, path: item.url.path, name: item.name, size: item.formattedSize())
+            try process.run()
+            statusLabel.stringValue = "Executed cleanup: \(cleanup.title)"
+        } catch {
+            NSAlert(error: error).runModal()
+        }
     }
     
     // MARK: - TreeMapSelectionDelegate
@@ -589,7 +716,7 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
     }
     
     public func didDoubleClick(item: FileItem) {
-        if item.isDirectory && !item.children.isEmpty {
+        if item.isDirectory && !item.children.isEmpty && item !== currentZoomRoot {
             currentZoomRoot = item
             treeMapView.displayedRootItem = item
             zoomUpButton.isEnabled = (item !== globalRootItem)
@@ -632,7 +759,7 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
             return barCell
         }
         
-        let cellView = NSTableCellView()
+        let cellView = NSTableCellView(frame: NSRect(x: 0, y: 0, width: col.width, height: 22))
         cellView.identifier = identifier
         
         let textField = NSTextField(frame: NSRect(x: 0, y: 2, width: col.width, height: 18))
@@ -700,7 +827,7 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
             return barCell
         }
         
-        let cellView = NSTableCellView()
+        let cellView = NSTableCellView(frame: NSRect(x: 0, y: 0, width: col.width, height: 22))
         cellView.identifier = id
         
         let textField = NSTextField(frame: NSRect(x: 0, y: 2, width: col.width, height: 18))
@@ -715,7 +842,7 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
         
         switch id.rawValue {
         case "Ext":
-            textField.stringValue = "■ .\(summary.ext)"
+            textField.stringValue = "■ " + ExtensionSummary.displayName(for: summary.ext)
             textField.textColor = summary.color
         case "ExtBytes":
             textField.stringValue = ByteCountFormatter.string(fromByteCount: Int64(summary.bytes), countStyle: .file)
@@ -734,7 +861,7 @@ public final class MainWindowController: NSWindowController, NSOutlineViewDataSo
         let row = extTableView.selectedRow
         if row >= 0, row < extensionSummaries.count {
             let summary = extensionSummaries[row]
-            statusLabel.stringValue = "Extension: .\(summary.ext) — \(ByteCountFormatter.string(fromByteCount: Int64(summary.bytes), countStyle: .file)) in \(summary.fileCount) files"
+            statusLabel.stringValue = "Extension: \(ExtensionSummary.displayName(for: summary.ext)) — \(ByteCountFormatter.string(fromByteCount: Int64(summary.bytes), countStyle: .file)) in \(summary.fileCount) files"
         }
     }
 }

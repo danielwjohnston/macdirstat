@@ -30,7 +30,9 @@ A native, high-performance macOS port of the classic **WinDirStat** disk usage a
   - **macOS System**: Adapts seamlessly to macOS Light / Dark Aqua appearance.
 
 - **Modern macOS Enhancements**:
-  - **APFS Clone Deduplication**: Deduplicates hard links and APFS copy-on-write file clones via POSIX inode tracking (`stat.st_dev` / `stat.st_ino`).
+  - **Hard Link & Firmlink Deduplication**: Hard-linked files and firmlinked folders (e.g. `/Users` vs `/System/Volumes/Data/Users`) are counted once via inode tracking (`st_dev` / `st_ino`). Symlinks are sized as links, never as their targets. (APFS clones have distinct inodes and are counted at their allocated size.)
+  - **Accurate Totals**: Hidden files and folders are included, `.app` bundles are sized in full even when collapsed, and other drives mounted under `/Volumes` or network shares are not double-counted when scanning `/`.
+  - **Parallel Scanning**: Subtrees are built concurrently off the main thread and handed to the UI only once complete, keeping the live treemap responsive and race-free.
   - **Native Quick Look**: Press `Spacebar` to immediately preview any selected file.
   - **Live Package Toggling**: Inspect inside `.app` / `.framework` bundles or treat them as atomic files.
 
@@ -53,10 +55,24 @@ cd macdirstat
 ```
 This compiles the release binary with Swift 6 strict concurrency checks, packages it into `/Applications/MacDirStat.app`, sets the high-resolution macOS squircle icon, and ad-hoc signs the application bundle.
 
+Optional environment overrides:
+```bash
+DEST_DIR=~/Apps ./build_app.sh                          # install somewhere other than /Applications
+SCRATCH_PATH=/Volumes/SomeAPFS/.build ./build_app.sh    # keep build products on another volume
+```
+If your checkout lives on an exFAT/FAT drive, point `SCRATCH_PATH` (and `DEST_DIR`) at an APFS volume: those filesystems store extended attributes as `._*` AppleDouble files, which `codesign` rejects.
+
+### Usage
+`MacDirStat.app` opens the **Select Drives** dialog on launch. To scan a folder directly, pass it as an argument:
+```bash
+open -a MacDirStat --args ~/Projects
+```
+
 ### Run Unit Tests:
 ```bash
 swift test
 ```
+(On exFAT checkouts use `swift test --scratch-path /Volumes/SomeAPFS/.build`.)
 
 ---
 

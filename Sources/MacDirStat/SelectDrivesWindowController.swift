@@ -203,8 +203,19 @@ public final class SelectDrivesWindowController: NSWindowController, NSTableView
                 targets = [URL(fileURLWithPath: "/")]
             }
         } else if radioFolder.state == .on {
-            let path = folderPathField.stringValue
-            targets = [chosenFolderURL ?? URL(fileURLWithPath: path)]
+            let path = (folderPathField.stringValue as NSString).expandingTildeInPath
+            var isDir: ObjCBool = false
+            if let chosen = chosenFolderURL, chosen.path == path {
+                targets = [chosen]
+            } else if FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue {
+                targets = [URL(fileURLWithPath: path)]
+            } else {
+                let alert = NSAlert()
+                alert.messageText = "Folder not found"
+                alert.informativeText = "\"\(path)\" is not an existing folder."
+                alert.runModal()
+                return
+            }
         }
         
         delegate?.didSelectScanTarget(urls: targets)
@@ -232,8 +243,9 @@ public final class SelectDrivesWindowController: NSWindowController, NSTableView
             return check
         }
         
-        let cell = NSTableCellView()
-        let tf = NSTextField(frame: NSRect(x: 0, y: 2, width: col.width, height: 18))
+        let cell = NSTableCellView(frame: NSRect(x: 0, y: 0, width: col.width, height: 24))
+        let tf = NSTextField(frame: NSRect(x: 0, y: 3, width: col.width, height: 18))
+        tf.autoresizingMask = [.width]
         tf.isBordered = false
         tf.isEditable = false
         tf.drawsBackground = false

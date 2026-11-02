@@ -210,11 +210,34 @@ public struct UserCleanupCommand: Codable, Sendable, Identifiable {
         self.title = title
         self.commandTemplate = commandTemplate
     }
+
+    /// Expands %p / %n / %s into shell variable references instead of pasting the raw values into the
+    /// script, so a file named e.g. `x"; rm -rf ~; "` can never become part of the command.
+    public static func expand(template: String) -> String {
+        return template
+            .replacingOccurrences(of: "%p", with: "${MDS_PATH}")
+            .replacingOccurrences(of: "%n", with: "${MDS_NAME}")
+            .replacingOccurrences(of: "%s", with: "${MDS_SIZE}")
+    }
+
+    public static func makeProcess(template: String, path: String, name: String, size: String) -> Process {
+        var environment = ProcessInfo.processInfo.environment
+        environment["MDS_PATH"] = path
+        environment["MDS_NAME"] = name
+        environment["MDS_SIZE"] = size
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = ["-c", expand(template: template)]
+        process.environment = environment
+        return process
+    }
 }
 
 @MainActor
 public final class AppSettings: ObservableObject {
     public static let shared = AppSettings()
+    public static let treemapSettingsChangedNotification = NSNotification.Name("TreemapSettingsChangedNotification")
     
     private let themeKey = "MacDirStat.Theme"
     private let minTileKey = "MacDirStat.MinTileSize"
@@ -229,11 +252,17 @@ public final class AppSettings: ObservableObject {
     }
     
     public var minTileSize: CGFloat {
-        didSet { UserDefaults.standard.set(minTileSize, forKey: minTileKey) }
+        didSet {
+            UserDefaults.standard.set(minTileSize, forKey: minTileKey)
+            NotificationCenter.default.post(name: AppSettings.treemapSettingsChangedNotification, object: nil)
+        }
     }
     
     public var cushionIntensity: CGFloat {
-        didSet { UserDefaults.standard.set(cushionIntensity, forKey: cushionIntensityKey) }
+        didSet {
+            UserDefaults.standard.set(cushionIntensity, forKey: cushionIntensityKey)
+            NotificationCenter.default.post(name: AppSettings.treemapSettingsChangedNotification, object: nil)
+        }
     }
     
     public var showFreeSpace: Bool {

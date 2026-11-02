@@ -120,6 +120,11 @@ public final class MetalTreemapRenderer: NSObject, MTKViewDelegate {
                         float distBottom = (rect.y + rect.w) - pos.y;
                         float minDist = min(min(distLeft, distRight), min(distTop, distBottom));
 
+                        if (in.isSelected > 1.5) {
+                            // Outline-only instance used to highlight a selected folder
+                            if (minDist < 2.0) return float4(1.0, 1.0, 1.0, 1.0);
+                            discard_fragment();
+                        }
                         if (in.isSelected > 0.5) {
                             if (minDist < 2.0) return float4(1.0, 1.0, 1.0, 1.0);
                         } else {
@@ -215,9 +220,9 @@ public final class MetalTreemapRenderer: NSObject, MTKViewDelegate {
             addRidge(rect: item.bounds, surface: &localSurface, h: ridgeHeight)
         }
         
-        if item.children.isEmpty || (!item.isDirectory || item.isPackage) {
+        if TreeMapEngine.isRenderedAsLeaf(item) {
             if item.bounds.width >= minPixel && item.bounds.height >= minPixel {
-                let color = colorForItem(item)
+                let color = colorForItem(item).usingColorSpace(.deviceRGB) ?? NSColor.gray
                 let isSel: Float = (item === selectedItem) ? 1.0 : 0.0
                 
                 let rect = SIMD4<Float>(
@@ -247,6 +252,15 @@ public final class MetalTreemapRenderer: NSObject, MTKViewDelegate {
                 var childSurface = localSurface
                 collectInstances(item: child, surface: &childSurface, ridgeHeight: nextRidge, depth: depth + 1, instances: &instances)
             }
+            if item === selectedItem {
+                let rect = SIMD4<Float>(
+                    Float(item.bounds.origin.x),
+                    Float(item.bounds.origin.y),
+                    Float(item.bounds.size.width),
+                    Float(item.bounds.size.height)
+                )
+                instances.append(MetalTileInstance(rect: rect, color: SIMD4<Float>(1, 1, 1, 1), surface: SIMD4<Float>(0, 0, 0, 0), isSelected: 2.0))
+            }
         }
     }
     
@@ -275,13 +289,7 @@ public final class MetalTreemapRenderer: NSObject, MTKViewDelegate {
         case .fileAge:
             return ExtensionColorManager.shared.colorForAge(date: item.modificationDate)
         case .depth:
-            var depth = 0
-            var p = item.parent
-            while p != nil {
-                depth += 1
-                p = p?.parent
-            }
-            let hue = CGFloat((depth * 37) % 360) / 360.0
+            let hue = CGFloat((item.depth * 37) % 360) / 360.0
             return NSColor(calibratedHue: hue, saturation: 0.75, brightness: 0.85, alpha: 1.0)
         }
     }
@@ -292,9 +300,8 @@ public final class MetalTreemapRenderer: NSObject, MTKViewDelegate {
     }
     
     public func draw(in view: MTKView) {
+        // Always run the pass so the clear color wipes the previous frame when nothing is laid out yet
         guard let pipelineState = pipelineState,
-              let instanceBuffer = instanceBuffer,
-              instanceCount > 0,
               let descriptor = view.currentRenderPassDescriptor,
               let drawable = view.currentDrawable,
               let commandBuffer = commandQueue.makeCommandBuffer(),
@@ -322,12 +329,13 @@ public final class MetalTreemapRenderer: NSObject, MTKViewDelegate {
             gridColor: grid
         )
         
-        encoder.setRenderPipelineState(pipelineState)
-        encoder.setVertexBuffer(instanceBuffer, offset: 0, index: 0)
-        encoder.setVertexBytes(&uniforms, length: MemoryLayout<MetalUniforms>.stride, index: 1)
-        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<MetalUniforms>.stride, index: 1)
-        
-        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: instanceCount)
+        if let instanceBuffer = instanceBuffer, instanceCount > 0 {
+            encoder.setRenderPipelineState(pipelineState)
+            encoder.setVertexBuffer(instanceBuffer, offset: 0, index: 0)
+            encoder.setVertexBytes(&uniforms, length: MemoryLayout<MetalUniforms>.stride, index: 1)
+            encoder.setFragmentBytes(&uniforms, length: MemoryLayout<MetalUniforms>.stride, index: 1)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: instanceCount)
+        }
         encoder.endEncoding()
         
         commandBuffer.present(drawable)
