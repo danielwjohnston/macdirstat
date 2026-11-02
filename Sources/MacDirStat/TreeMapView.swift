@@ -100,6 +100,20 @@ public final class TreeMapView: NSView {
         return true
     }
     
+    public override var acceptsFirstResponder: Bool {
+        return true
+    }
+    
+    /// Re-runs layout and redraws, e.g. after the tree or a treemap setting changed
+    public func refresh() {
+        if let root = displayedRootItem {
+            TreeMapEngine.layout(item: root, in: bounds)
+        }
+        metalRenderer?.updateGeometry()
+        mtkView?.setNeedsDisplay(bounds)
+        setNeedsDisplay(bounds)
+    }
+    
     public override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
@@ -137,9 +151,9 @@ public final class TreeMapView: NSView {
         super.layout()
         if let root = displayedRootItem {
             TreeMapEngine.layout(item: root, in: bounds)
-            metalRenderer?.updateGeometry()
-            mtkView?.setNeedsDisplay(bounds)
         }
+        metalRenderer?.updateGeometry()
+        mtkView?.setNeedsDisplay(bounds)
     }
     
     public override func draw(_ dirtyRect: NSRect) {
@@ -187,7 +201,7 @@ public final class TreeMapView: NSView {
             addRidge(rect: item.bounds, surface: &localSurface, h: ridgeHeight)
         }
         
-        if item.children.isEmpty || (!item.isDirectory || item.isPackage) {
+        if TreeMapEngine.isRenderedAsLeaf(item) {
             if item.bounds.width >= minPixel && item.bounds.height >= minPixel {
                 drawCushionTile(item: item, surface: localSurface, in: context)
             }
@@ -196,6 +210,11 @@ public final class TreeMapView: NSView {
             for child in item.children where child.size > 0 {
                 var childSurface = localSurface
                 drawTree(item: child, surface: &childSurface, ridgeHeight: nextRidge, depth: depth + 1, in: context)
+            }
+            if item === selectedItem {
+                context.setStrokeColor(NSColor.white.cgColor)
+                context.setLineWidth(2.0)
+                context.stroke(item.bounds.insetBy(dx: 1, dy: 1))
             }
         }
     }
@@ -227,13 +246,7 @@ public final class TreeMapView: NSView {
             case .fileAge:
                 baseColor = ExtensionColorManager.shared.colorForAge(date: item.modificationDate)
             case .depth:
-                var depth = 0
-                var p = item.parent
-                while p != nil {
-                    depth += 1
-                    p = p?.parent
-                }
-                let hue = CGFloat((depth * 37) % 360) / 360.0
+                let hue = CGFloat((item.depth * 37) % 360) / 360.0
                 baseColor = NSColor(calibratedHue: hue, saturation: 0.75, brightness: 0.85, alpha: 1.0)
             }
         }
@@ -312,6 +325,7 @@ public final class TreeMapView: NSView {
     }
     
     public override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)
         if let hit = hitTestItem(root: displayedRootItem, point: point) {
             selectedItem = hit
@@ -334,10 +348,10 @@ public final class TreeMapView: NSView {
     
     private func hitTestItem(root: FileItem?, point: CGPoint) -> FileItem? {
         guard let root = root, root.bounds.contains(point) else { return nil }
-        if root.children.isEmpty || (!root.isDirectory || root.isPackage) {
+        if TreeMapEngine.isRenderedAsLeaf(root) {
             return root
         }
-        for child in root.children {
+        for child in root.children where child.size > 0 {
             if let found = hitTestItem(root: child, point: point) {
                 return found
             }

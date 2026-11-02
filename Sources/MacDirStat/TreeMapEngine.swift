@@ -3,6 +3,17 @@ import CoreGraphics
 
 public struct TreeMapEngine {
     public static let minDimension: CGFloat = 1.0
+    /// Folders smaller than this are drawn as a single tile instead of being subdivided
+    public static let minSubdivideDimension: CGFloat = 4.0
+    
+    /// Whether the renderers and hit testing should treat `item` as one tile. This must match the
+    /// recursion rule in `layout`, otherwise children keep stale bounds from an earlier, larger layout.
+    public static func isRenderedAsLeaf(_ item: FileItem) -> Bool {
+        return item.isLeafLike
+            || item.children.isEmpty
+            || item.bounds.width < minSubdivideDimension
+            || item.bounds.height < minSubdivideDimension
+    }
 
     /// Computes squarified treemap layout using Bruls, Huizing, van Wijk algorithm
     public static func layout(item: FileItem, in rect: CGRect) {
@@ -23,7 +34,7 @@ public struct TreeMapEngine {
         
         // Recursively lay out children within their designated bounds
         for child in validChildren {
-            if child.isDirectory && !child.isPackage && child.bounds.width >= 4 && child.bounds.height >= 4 {
+            if !isRenderedAsLeaf(child) {
                 // Inset by 1px cushion border matching WinDirStat
                 let inner = child.bounds.insetBy(dx: 1, dy: 1)
                 layout(item: child, in: inner)
